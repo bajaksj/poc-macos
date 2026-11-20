@@ -1,0 +1,12 @@
+name: macprobe
+on:
+  workflow_dispatch:
+jobs:
+  probe:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-13, macos-latest, macos-15]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - run: sw_vers; uname -m; echo PROBE_OK_${{ matrix.os }}
