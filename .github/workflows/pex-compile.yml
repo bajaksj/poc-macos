@@ -73,14 +73,18 @@ jobs:
 
 
           def build(subject_val, body_val, to_val="test@example.com", att_val="/tmp/report.pdf"):
-              # single-line lists: AppleScript has no implicit line continuation
+              # no newline may sit inside {...}: AppleScript has no implicit
+              # line continuation, and every close-brace literal starts with '}'
+              # so the value must be emitted directly against it.
+              # body slot: the code appends 'content:' + value, then the concat
+              # literal '" & linefeed & linefeed' supplies the closing quote.
               return "".join([
-                  L["tos"], q(to_val), "\n",
-                  L["ccs"], q(""), "\n",
-                  L["bccs"], q(""), "\n",
-                  L["att"], q(att_val), "\n",
+                  L["tos"], q(to_val),
+                  L["ccs"], q(""),
+                  L["bccs"], q(""),
+                  L["att"], q(att_val),
                   L["newmsg"],
-                  "subject: ", q(subject_val), ", content:", q(" " + body_val),
+                  "subject: ", q(subject_val), ', content:"', body_val,
                   L["concat"],
                   L["tail1"],
                   L["tail2"],
