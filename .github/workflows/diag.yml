@@ -1,0 +1,8 @@
+name: diag
+on:
+  workflow_dispatch:
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - run: uname -a; echo LINUX_OK
