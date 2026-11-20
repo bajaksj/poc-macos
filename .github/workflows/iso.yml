@@ -1,0 +1,71 @@
+name: isolate
+
+on:
+  workflow_dispatch:
+
+jobs:
+  iso:
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - name: T0 - does do shell script work at all
+        run: |
+          set +e
+          rm -f /tmp/t0
+          timeout 20 osascript -e 'do shell script "id > /tmp/t0"'
+          echo "exit=$?"; echo "T0: $(cat /tmp/t0 2>/dev/null || echo EMPTY)"
+
+      - name: T1 - injection inside a record, NO Mail involved
+        run: |
+          set +e
+          rm -f /tmp/t1
+          printf '%s\n' 'set r to {subject:"Invoice", content:"x" & do shell script "id > /tmp/t1" & "" & linefeed & linefeed}' > t1.scpt
+          nl -ba t1.scpt
+          timeout 25 osascript t1.scpt; echo "exit=$?"
+          echo "T1: $(cat /tmp/t1 2>/dev/null || echo EMPTY)"
+
+      - name: T2 - control, escaped quote, no Mail
+        run: |
+          set +e
+          rm -f /tmp/t2
+          printf '%s\n' 'set r to {subject:"Invoice", content:"x\" & do shell script \"id > /tmp/t2\" & \"" & linefeed & linefeed}' > t2.scpt
+          nl -ba t2.scpt
+          timeout 25 osascript t2.scpt; echo "exit=$?"
+          echo "T2: $(cat /tmp/t2 2>/dev/null || echo EMPTY)"
+
+      - name: T3 - Mail record with a bounded AppleEvent timeout
+        run: |
+          set +e
+          rm -f /tmp/t3
+          printf '%s\n' \
+            'with timeout of 8 seconds' \
+            'tell application "Mail"' \
+            'set newMessage to make new outgoing message with properties {subject:"Invoice", content:"x" & do shell script "id > /tmp/t3" & "" & linefeed & linefeed}' \
+            'end tell' \
+            'end timeout' > t3.scpt
+          nl -ba t3.scpt
+          osacompile -o /tmp/t3c.scpt t3.scpt && echo "T3 COMPILE OK" || echo "T3 COMPILE FAILED"
+          timeout 40 osascript t3.scpt; echo "exit=$?"
+          echo "T3: $(cat /tmp/t3 2>/dev/null || echo EMPTY)"
+
+      - name: T4 - Mail: is it scriptable at all on this runner
+        run: |
+          set +e
+          timeout 30 osascript -e 'tell application "Mail" to get version'; echo "exit=$?"
+          ls /System/Applications/Mail.app >/dev/null 2>&1 && echo "Mail.app present" || echo "Mail.app MISSING"
+          pgrep -x Mail >/dev/null && echo "Mail running" || echo "Mail not running"
+
+      - name: Collect
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: iso
+          path: |
+            t1.scpt
+            t2.scpt
+            t3.scpt
+            /tmp/t0
+            /tmp/t1
+            /tmp/t2
+            /tmp/t3
+          if-no-files-found: warn
