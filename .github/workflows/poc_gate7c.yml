@@ -1,0 +1,54 @@
+name: pdfexpert-gate7c
+
+on:
+  workflow_dispatch:
+
+jobs:
+  g7c:
+    runs-on: macos-latest
+    timeout-minutes: 10
+    steps:
+      - name: T1 - do shell script inside a tell block, responsive app (Finder)
+        run: |
+          set +e
+          rm -f /tmp/pdfe_f1
+          START=$(date +%s)
+          OUT=$(osascript -e 'with timeout of 10 seconds' -e 'tell application "Finder"' -e 'do shell script "id > /tmp/pdfe_f1"' -e 'end tell' -e 'return "T1 DONE"' -e 'end timeout' 2>&1)
+          RC=$?
+          echo "T1 RC=$RC ELAPSED=$(( $(date +%s) - START ))s OUT=[$OUT] MARKER=[$(cat /tmp/pdfe_f1 2>/dev/null | head -c 60)]"
+
+      - name: T2 - do shell script inside a properties record of a make event (Finder)
+        run: |
+          set +e
+          rm -f /tmp/pdfe_f2
+          START=$(date +%s)
+          OUT=$(osascript -e 'with timeout of 10 seconds' -e 'tell application "Finder" to make new folder at desktop with properties {name:"g7" & (do shell script "echo -n ran > /tmp/pdfe_f2; echo -n TAG")}' -e 'end timeout' 2>&1)
+          RC=$?
+          echo "T2 RC=$RC ELAPSED=$(( $(date +%s) - START ))s OUT=[$OUT] MARKER=[$(cat /tmp/pdfe_f2 2>/dev/null)]"
+
+      - name: T3 - do shell script inside a tell block, target Mail, no make event at all
+        run: |
+          set +e
+          rm -f /tmp/pdfe_m1
+          START=$(date +%s)
+          OUT=$(osascript -e 'with timeout of 10 seconds' -e 'tell application "Mail"' -e 'do shell script "id > /tmp/pdfe_m1"' -e 'end tell' -e 'return "T3 DONE"' -e 'end timeout' 2>&1)
+          RC=$?
+          echo "T3 RC=$RC ELAPSED=$(( $(date +%s) - START ))s OUT=[$OUT] MARKER=[$(cat /tmp/pdfe_m1 2>/dev/null | head -c 60)]"
+
+      - name: T4 - do shell script with Mail as the direct tell target, one line
+        run: |
+          set +e
+          rm -f /tmp/pdfe_m2
+          START=$(date +%s)
+          OUT=$(osascript -e 'with timeout of 10 seconds' -e 'tell application "Mail" to do shell script "id > /tmp/pdfe_m2"' -e 'end timeout' 2>&1)
+          RC=$?
+          echo "T4 RC=$RC ELAPSED=$(( $(date +%s) - START ))s OUT=[$OUT] MARKER=[$(cat /tmp/pdfe_m2 2>/dev/null | head -c 60)]"
+
+      - name: T5 - same record, evaluated with no tell context (baseline)
+        run: |
+          set +e
+          rm -f /tmp/pdfe_b1
+          OUT=$(osascript -e 'set r to {subject:"Invoice", content:"x" & do shell script "id > /tmp/pdfe_b1" & "" & linefeed & linefeed}' -e 'return content of r' 2>&1)
+          echo "T5 RC=$? OUT=[$OUT] MARKER=[$(cat /tmp/pdfe_b1 2>/dev/null | head -c 60)]"
+          killall Mail 2>/dev/null
+          echo cleanup-done
