@@ -85,11 +85,15 @@ def build(binary: Binary, cmd: str, inject_into: str = 'body') -> str:
     # two quotes emits one extra `"` and the script fails to compile with
     # "Expected , or } but found end of line" — measured on a macOS runner.
     body = '"' + (payload if inject_into == 'body' else 'See attached.')
+    # No newline may sit between a value and its closing '}': every close-brace
+    # literal starts with '}', so the value must be emitted directly against it.
+    # Measured on run 44786196996: a '\n' after the tos value fails osacompile
+    # with "generated.scpt:2: Expected , or } but found end of line (-2741)".
     return ''.join([
-        L['tos'], quoted('test@example.com'), '\n',
-        L['ccs'], quoted(''), '\n',
-        L['bccs'], quoted(''), '\n',
-        L['att'], quoted('/tmp/report.pdf'), '\n',
+        L['tos'], quoted('test@example.com'),
+        L['ccs'], quoted(''),
+        L['bccs'], quoted(''),
+        L['att'], quoted('/tmp/report.pdf'),
         L['newmsg'],
         'subject:', subject, ', ',
         'content:', body,
